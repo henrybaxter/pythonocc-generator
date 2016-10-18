@@ -1,4 +1,4 @@
-##Copyright 2008-2015 Thomas Paviot (tpaviot@gmail.com)
+# Copyright 2008-2015 Thomas Paviot (tpaviot@gmail.com)
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -15,175 +15,121 @@
 
 from __future__ import print_function
 
+import logging
+import errno
 import glob
 import os
-import os.path
-import ConfigParser
 import sys
 import re
+import itertools
+try:
+    # Python 2.x
+    import ConfigParser as configparser
+except ImportError:
+    # Python 3.x
+    import configparser
 
-from Modules import *
-
-
-# import CppHeaderParser
-def path_from_root(*pathelems):
-    return os.path.join(__rootpath__, *pathelems)
-__rootpath__ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path = [path_from_root('src', 'contrib', 'cppheaderparser')] + sys.path
 import CppHeaderParser
 
-all_toolkits = [TOOLKIT_Foundation,
-                TOOLKIT_Modeling,
-                TOOLKIT_Visualisation,
-                TOOLKIT_DataExchange,
-                TOOLKIT_OCAF,
-                #TOOLKIT_SMesh,
-                TOOLKIT_VTK]
-TOOLKITS = {}
-for tk in all_toolkits:
-    TOOLKITS.update(tk)
+from .export_modules import EXPORT_MODULES
+from .framework_toolkits import FRAMEWORK_TOOLKITS
+from .excludes import TYPEDEFS_TO_EXCLUDE, HEADERS_TO_EXCLUDE
+from .license import get_license_header
 
-#
-# Load configuration file and setup settings
-#
-header_year = "2008-2016"
-author = "Thomas Paviot"
-author_email = "tpaviot@gmail.com"
-license_header = """
-This file is part of pythonOCC.
-pythonOCC is free software: you can redistribute it and/or modify
-it under the terms of the GNU Lesser General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+HEADER_DEPENDENCY = ['TColgp', 'TColStd', 'TCollection', 'Storage']
 
-pythonOCC is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Lesser General Public License for more details.
-
-You should have received a copy of the GNU Lesser General Public License
-along with pythonOCC.  If not, see <http://www.gnu.org/licenses/>.
-"""
-config = ConfigParser.ConfigParser()
-config.read('wrapper_generator.conf')
-# pythonocc version
-PYTHONOCC_VERSION = config.get('pythonocc-core', 'version')
-# oce headers location
-try:
-    oce_base_dir = config.get('OCE', 'base_dir')
-    OCE_INCLUDE_DIR = os.path.join(oce_base_dir, 'include', 'oce')
-except ConfigParser.NoOptionError:
-    OCE_INCLUDE_DIR = config.get('OCE', 'include_dir')
-if not os.path.isdir(OCE_INCLUDE_DIR):
-    raise AssertionError("OCE include dir %s not found." % OCE_INCLUDE_DIR)
-# smesh, if any
-smesh_base_dir = config.get('SMESH', 'base_dir')
-SMESH_INCLUDE_DIR = os.path.join(smesh_base_dir, 'include', 'smesh')
-if not os.path.isdir(SMESH_INCLUDE_DIR):
-    print("SMESH include dir %s not found. SMESH wrapper not generated." % SMESH_INCLUDE_DIR)
-# swig output path
-SWIG_OUTPUT_PATH = config.get('pythonocc-core', 'generated_swig_files')
-# cmake output path, i.e. the location where the __init__.py file is created
-CMAKE_PATH = config.get('pythonocc-core', 'init_path')
-
-# check if SWIG_OUTPUT_PATH exists, otherwise create it
-if not os.path.isdir(SWIG_OUTPUT_PATH):
-    os.mkdir(SWIG_OUTPUT_PATH)
-
-# the following var is set when the module
-# is created
-CURRENT_MODULE = None
-CURRENT_HEADER_CONTENT = None
-PYTHON_MODULE_DEPENDENCY = []
-HEADER_DEPENDENCY = []
+logger = logging.getLogger(__name__)
 
 
-def reset_header_depency():
-    global HEADER_DEPENDENCY
-    HEADER_DEPENDENCY = ['TColgp', 'TColStd', 'TCollection', 'Storage']
-
-# remove headers that can't be parse by CppHeaderParser
-HXX_TO_EXCLUDE = ['TCollection_AVLNode.hxx',
-                  'AdvApp2Var_Data_f2c.hxx',
-                  'NCollection_DataMap.hxx',
-                  'NCollection_DoubleMap.hxx',
-                  'NCollection_IndexedDataMap.hxx',
-                  'NCollection_IndexedMap.hxx', 'NCollection_Map.hxx',
-                  'NCollection_CellFilter.hxx',
-                  'NCollection_EBTree.hxx',
-                  'NCollection_BaseSequence.hxx',
-                  'NCollection_Haft.h',
-                  'NCollection_StlIterator.hxx',
-                  'Standard_StdAllocator.hxx',
-                  'Standard_CLocaleSentry.hxx',
-                  'BOPTools_DataMapOfShapeSet.hxx',
-                  'Resource_gb2312.h', 'Resource_Shiftjis.h',
-                  'TopOpeBRepBuild_SplitShapes.hxx',
-                  'TopOpeBRepBuild_SplitSolid.hxx',
-                  'TopOpeBRepBuild_Builder.hxx',
-                  'TopOpeBRepBuild_SplitEdge.hxx',
-                  'TopOpeBRepBuild_Fill.hxx',
-                  'TopOpeBRepBuild_SplitFace.hxx',
-                  'TopOpeBRepDS_traceDSX.hxx',
-                  'ChFiKPart_ComputeData_ChAsymPlnCon.hxx',
-                  'ChFiKPart_ComputeData_ChAsymPlnCyl.hxx',
-                  'ChFiKPart_ComputeData_ChAsymPlnPln.hxx',
-                  'ChFiKPart_ComputeData_ChPlnCon.hxx',
-                  'ChFiKPart_ComputeData_ChPlnCyl.hxx',
-                  'ChFiKPart_ComputeData_ChPlnPln.hxx',
-                  'ChFiKPart_ComputeData_Sphere.hxx',
-                  'Font_FTFont.hxx', 'Font_FTLibrary.hxx',
-                  'IntTools_LineConstructor.hxx',
-                  'IntTools_PolyhedronTool.hxx',
-                  'IntPatch_PolyhedronTool.hxx',
-                  'IntPatch_TheInterfPolyhedron.hxx',
-                  'SelectMgr_CompareResults.hxx',
-                  'InterfaceGraphic_wntio.hxx',
-                  'Interface_STAT.hxx',
-                  'Aspect_DisplayConnection.hxx',
-                  'XSControl_Vars.hxx',
-                  'MeshVS_Buffer.hxx',
-                  'SMDS_SetIterator.hxx',
-                  'SMESH_Block.hxx',
-                  'SMESH_ExceptHandlers.hxx', 'StdMeshers_Penta_3D.hxx',
-                  'SMESH_ControlsDef.hxx',
-                  'SMESH_Algo.hxx',
-                  'SMESH_0D_Algo.hxx', 'SMESH_1D_Algo.hxx',
-                  'SMESH_2D_Algo.hxx',
-                  'SMESH_3D_Algo.hxx',
-                  'IntTools_CurveRangeSampleMapHasher.hxx',
-                  'Interface_ValueInterpret.hxx',
-                  'StepToTopoDS_DataMapOfRI.hxx',
-                  'StepToTopoDS_DataMapOfTRI.hxx',
-                  'StepToTopoDS_DataMapOfRINames.hxx',
-                  'StepToTopoDS_PointEdgeMap.hxx',
-                  'StepToTopoDS_PointVertexMap.hxx'
-                  # New excludes for 0.17
-                  'NCollection_StlIterator.hxx',
-                  #'BOPAlgo_MakerVolume.hxx',
-                  'BOPTools_CoupleOfShape.hxx',
-                  'BRepApprox_SurfaceTool.hxx',
-                  'BRepBlend_HCurveTool.hxx',
-                  'BRepBlend_HCurve2dTool.hxx',
-                  'BRepMesh_FaceAttribute.hxx',
-                  'ChFiKPart_ComputeData_FilPlnCon.hxx',
-                  'ChFiKPart_ComputeData_FilPlnPln.hxx',
-                  'ChFiKPart_ComputeData_FilPlnCyl.hxx',
-                  'ChFiKPart_ComputeData_Rotule.hxx',
-                  'PrsMgr_ListOfPresentableObjects.hxx',
-                  'PrsMgr_PresentableObject.hxx',
-                  'TDF_LabelMapHasher.hxx'
-                  ]
+# CURRENT_MODULE = None
+# CURRENT_HEADER_CONTENT = None
+# PYTHON_MODULE_DEPENDENCY = []
+# HEADER_DEPENDENCY = []
 
 
-# some typedefs parsed by CppHeader can't be wrapped
-# and generate SWIG syntax errors. We just forget
-# about wrapping those typedefs
-TYPEDEF_TO_EXCLUDE = ['NCollection_DelMapNode',
-                      'BOPDS_DataMapOfPaveBlockCommonBlock',
-                      'IntWalk_VectorOfWalkingData',
-                      'IntWalk_VectorOfInteger'
-                      ]
+def merge_dicts(*dicts):
+    result = {}
+    for d in dicts:
+        in_common = set(result.keys()) & set(d.keys())
+        if in_common:
+            raise AssertionError("Duplicate key(s) found: %s" % in_common)
+        result.update(d)
+    return result
+
+
+def merge_lists(*lists):
+    return list(itertools.chain(*lists))
+
+
+def makedirs(d):
+    try:
+        os.makedirs(d)
+    except OSError as e:
+        if e.errno == errno.EEXIST and os.path.isdir(d):
+            pass
+        else:
+            raise
+
+
+def read_config():
+    result = {}
+    config = configparser.ConfigParser()
+    config.read('wrapper_generator.conf')
+    result['PYTHONOCC_VERSION'] = config.get('pythonocc-core', 'version')
+    result['OC_INCLUDE_DIR'] = config.get('OC', 'include_dir')
+    result['SMESH_INCLUDE_DIR'] = config.get('SMESH', 'include_dir')
+    result['SWIG_OUTPUT_DIR'] = config.get('pythonocc-core', 'generated_swig_dir')
+    result['CMAKE_DIR'] = config.get('pythonocc-core', 'init_dir')
+    result['PARALLEL_BUILD'] = config.getboolean('build', 'parallel_build')
+    return result
+
+
+def ensure_config(config):
+    if not os.path.exists(config['OC_INCLUDE_DIR']):
+        raise AssertionError('OC include directory %s not found' % config['OC_INCLUDE_DIR'])
+    if not os.path.exists(config['SMESH_INCLUDE_DIR']):
+        logger.warning('SMESH include directory %s not found', config['SMESH_INCLUDE_DIR'])
+    if not os.path.exists(config['SWIG_OUTPUT_DIR']):
+        logger.warning('SWIG output directory %s not found, creating')
+        makedirs(config['SWIG_OUTPUT_DIR'])
+    if not os.path.exists(config['CMAKE_DIR']):
+        logger.warning('CMake output directory %s not found, creating')
+        makedirs(config['CMAKE_DIR'])
+    return config
+
+
+class OCGenerator(object):
+
+    def __init__(self, config):
+        self.toolkits = merge_dicts(FRAMEWORK_TOOLKITS.values())
+        self.modules = merge_dicts(EXPORT_MODULES.values())
+        self.config = config
+
+    def process_module(self, name):
+        try:
+            dependencies, class_excludes, member_excludes = self.modules[name]
+        except KeyError:
+            raise KeyError("Cannot find %s in export_modules.py list")
+        ModuleWrapper(name, dependencies, class_excludes, member_excludes)
+
+    def process_toolkit(self, toolkit):
+        logger.info('Processing toolkit %s', toolkit)
+        modules = self.modules[toolkit]
+        if self.config['PARALLEL_BUILD']:
+            map_parallel(self.process_module, modules)
+        for module in self.toolkits[toolkit]:
+            map(self.process_module, modules)
+
+    def process_framework(self, framework):
+        logger.info('Processing framework %s', framework)
+        for toolkit in FRAMEWORK_TOOLKITS[framework]:
+            self.process_toolkit(toolkit)
+
+    def process_everything(self):
+        logger.debug('Processing all frameworks')
+        for framework in FRAMEWORK_TOOLKITS.keys():
+            self.process_framework(framework)
+
 
 
 def process_handle(class_name, inherits_from_class_name):
@@ -290,37 +236,9 @@ class Handle_%s : public Handle_%s {
     return handle_constructor_append + handle_inheritance_declaration + handle_body_template % c
 
 
-def filter_header_list(header_list):
-    """ From a header list, remove hxx to HXX_TO_EXCLUDE
-    """
-    for header_to_remove in HXX_TO_EXCLUDE:
-        if os.path.join(OCE_INCLUDE_DIR, header_to_remove) in header_list:
-            header_list.remove(os.path.join(OCE_INCLUDE_DIR, header_to_remove))
-        elif os.path.join(SMESH_INCLUDE_DIR, header_to_remove) in header_list:
-            header_list.remove(os.path.join(SMESH_INCLUDE_DIR, header_to_remove))
-    # remove platform dependent files
-    # this is done to have the same SWIG files on every platform
-    # wnt specific
-    header_list = [x for x in header_list if not ('WNT' in x.lower())]
-    header_list = [x for x in header_list if not ('wnt' in x.lower())]
-    # linux
-    header_list = [x for x in header_list if not ('X11' in x)]
-    header_list = [x for x in header_list if not ('XWD' in x)]
-    # and osx
-    header_list = [x for x in header_list if not ('Cocoa' in x)]
-    return header_list
-
-
-def test_filter_header_list():
-    if sys.platform != 'win32':
-        assert(filter_header_list(['something', 'somethingWNT']) == ['something'])
-
-
 def case_sensitive_glob(wildcard):
-    """
-    Case sensitive glob for Windows.
-    Designed for handling of GEOM and Geom modules
-    This function makes the difference between GEOM_* and Geom_* under Windows
+    """Case sensitive glob
+    To catche the difference between GEOM_* and Geom_* under Windows
     """
     flist = glob.glob(wildcard)
     pattern = wildcard.split('*')[0]
@@ -331,29 +249,39 @@ def case_sensitive_glob(wildcard):
     return f
 
 
-def get_all_module_headers(module_name):
-    """ Returns a list with all header names
+def is_good_header(header):
+    if header in HEADERS_TO_EXCLUDE:
+        return False
+    for bad in ['WNT', 'wnt', 'X11', 'XWD', 'Cocoa']:
+        if header.startswith(bad):
+            return False
+    return True
+
+
+def get_all_module_headers(self, directories, module_name):
+    """Returns a list with all header names
     """
-    mh = case_sensitive_glob(os.path.join(OCE_INCLUDE_DIR, '%s.hxx' % module_name))
-    mh += case_sensitive_glob(os.path.join(OCE_INCLUDE_DIR, '%s_*.hxx' % module_name))
-    mh += case_sensitive_glob(os.path.join(OCE_INCLUDE_DIR, '%s*.h' % module_name))
-    mh += case_sensitive_glob(os.path.join(OCE_INCLUDE_DIR, 'Handle_%s.hxx*' % module_name))
-    mh += case_sensitive_glob(os.path.join(SMESH_INCLUDE_DIR, '%s.hxx' % module_name))
-    mh += case_sensitive_glob(os.path.join(SMESH_INCLUDE_DIR, '%s_*.hxx' % module_name))
-    mh += case_sensitive_glob(os.path.join(SMESH_INCLUDE_DIR, '%s*.h' % module_name))
-    mh += case_sensitive_glob(os.path.join(SMESH_INCLUDE_DIR, 'Handle_%s.hxx*' % module_name))
-    mh = filter_header_list(mh)
-    return map(os.path.basename, mh)
+    patterns = ['%s.hxx', '%s_*.hxx', '%s*.h', 'Handle_%s.hxx*']
+    patterns = [pattern % module_name for pattern in patterns]
+    headers = []
+    for directory in directories:
+        for pattern in patterns:
+            pattern = os.path.join(directory, pattern)
+            paths = [module_name in path for path in glob.glob(pattern)]
+            headers.extend(paths)
+    headers = [os.path.basename(header) for header in headers]
+    headers = list(filter(is_good_header, headers))
+    return headers
 
 
 def test_get_all_module_headers():
     # 'Standard' should return some files (at lease 10)
     # this number depends on the OCE version
-    headers_list_1 = get_all_module_headers("Standard")
+    headers_list_1 = list(get_all_module_headers("Standard"))
     assert(len(headers_list_1) > 10)
     # an empty list
-    headers_list_2 = get_all_module_headers("something_else")
-    assert(not headers_list_2)
+    headers_list_2 = list(get_all_module_headers("something_else"))
+    assert(not headers_list_2), headers_list_2
 
 
 def check_has_related_handle(class_name):
@@ -367,30 +295,16 @@ def check_has_related_handle(class_name):
     return (os.path.exists(filename) or os.path.exists(other_possible_filename) or need_handle())
 
 
-def get_license_header():
-    """ Write the header to the different SWIG files
-    """
-    header = "/*\nCopyright %s %s (%s)\n\n" % (header_year, author, author_email)
-    header += license_header
-    header += "\n*/\n"
-    return header
-
-
-def write__init__():
-    """ creates the OCC/__init__.py file.
-    In this file, the Version is created.
-    The OCE version is checked into the oce-version.h file
-    """
-    fp__init__ = open(os.path.join(CMAKE_PATH, '__init__.py'), 'w')
-    fp__init__.write('VERSION = "%s"\n' % PYTHONOCC_VERSION)
-    # @TODO : then check OCE version
+def write_version(directory, version):
+    f = open(os.path.join(directory, '__init__.py'), 'w')
+    f.write('VERSION = "%s"\n' % version)
 
 
 def need_handle():
     """ Returns True if the current parsed class needs an
     Handle to be defined. This is useful when headers define
     handles but no header """
-    # @TODO what about DEFINE_RTTI ?
+    # TODO what about DEFINE_RTTI ?
     if 'DEFINE_STANDARD_HANDLE' in CURRENT_HEADER_CONTENT:
         return True
     else:
@@ -409,7 +323,7 @@ def adapt_header_file(header_content):
     matches = outer.findall(header_content)
     if matches:
         for match in matches:
-            # @TODO find inheritance name
+            # TODO find inheritance name
             header_content = header_content.replace('DEFINE_STANDARD_HANDLE',
                                                     '//DEFINE_STANDARD_HANDLE')
     # then we look for Handle(Something) use
@@ -420,7 +334,7 @@ def adapt_header_file(header_content):
         for match in matches:
             orig_match = match
             # matches are of the form :
-            #['Handle(Graphic3d_Structure)',
+            # ['Handle(Graphic3d_Structure)',
             # 'Handle(Graphic3d_DataStructureManager)']
             match = match.replace(" ", "")
             match = (match.split('Handle(')[1]).split(')')[0]
@@ -442,7 +356,7 @@ def parse_header(header_filename):
     adapted_header_content = adapt_header_file(header_content)
     try:
         cpp_header = CppHeaderParser.CppHeader(adapted_header_content, "string")
-    except CppHeaderParser.CppParseError, e:
+    except CppHeaderParser.CppParseError as e:
         print(e)
         print("Filename : %s" % header_filename)
         print("FileContent :\n", adapted_header_content)
@@ -465,8 +379,10 @@ def filter_typedefs(typedef_dict):
 
 
 def test_filter_typedefs():
-    a_dict = {'1': 'one', '{': 'two', '3': 'aNCollection_DelMapNodeb'}
-    #assert(filter_typedefs(a_dict) == {'1': 'one'})
+    # TODO
+    # a_dict = {'1': 'one', '{': 'two', '3': 'aNCollection_DelMapNodeb'}
+    # assert(filter_typedefs(a_dict) == {'1': 'one'})
+    pass
 
 
 def process_typedefs(typedefs_dict):
@@ -599,7 +515,7 @@ def adapt_return_type(return_type):
     return_type = return_type.replace("TAncestorMap", "TopTools_IndexedDataMapOfShapeListOfShape")
     return_type = return_type.replace("ErrorCode", "SMESH_Pattern::ErrorCode")
     return_type = return_type.replace("Fineness", "NETGENPlugin_Hypothesis::Fineness")
-    #ex: Handle_WNT_GraphicDevice const &
+    # ex: Handle_WNT_GraphicDevice const &
     # for instance "const TopoDS_Shape & -> ["const", "TopoDS_Shape", "&"]
     if (('gp' in return_type) and not ('TColgp' in return_type))or ('TopoDS' in return_type):
         return_type = return_type.replace('&', '')
@@ -648,7 +564,7 @@ def process_docstring(f):
                 param_type = param_type.replace("&", "")
             param_type = param_type.strip()
             parameters_string += "\t:param %s:" % param["name"]
-            #parameters_string += "\t%s(%s)" % (param["name"], param_type, )
+            # parameters_string += "\t%s(%s)" % (param["name"], param_type, )
             if "defaultValue" in param:
                 def_value = adapt_default_value(param["defaultValue"])
                 parameters_string += " default value is %s" % def_value
@@ -743,7 +659,7 @@ def filter_member_functions(class_public_methods, member_functions_to_exclude, c
     """
     member_functions_to_process = []
     for public_method in class_public_methods:
-        #print(public_method)
+        # print(public_method)
         method_name = public_method["name"]
         if method_name in member_functions_to_exclude:
             continue
@@ -872,8 +788,8 @@ def process_function(f):
     if "TYPENAME" in f["rtnType"]:
         return ""  # something in NCollection
     if function_name == "Handle":  # TODO: make it possible!
-    # this is because Handle (something) some function can not be
-    # handled by swig
+          # this is because Handle (something) some function can not be
+          # handled by swig
         return ""
     # enable autocompactargs feature to enable compilation with swig>3.0.3
     str_function = '\t\t%%feature("compactdefaultargs") %s;\n' % function_name
@@ -974,15 +890,15 @@ def must_ignore_default_destructor(klass):
     """
     class_protected_methods = klass['methods']['protected']
     for protected_method in class_protected_methods:
-        #print(public_method)
-        #if klass["name"]=="BOPAlgo_BuilderShape":
+        # print(public_method)
+        # if klass["name"]=="BOPAlgo_BuilderShape":
         #  print(protected_method)
         if protected_method["destructor"]:
             return True
     class_private_methods = klass['methods']['private']
     # finally, return True, the default constructor can be safely defined
     for private_method in class_private_methods:
-        #print(public_method)
+        # print(public_method)
         if private_method["destructor"]:
             return True
     return False
@@ -1011,13 +927,13 @@ def class_can_have_default_constructor(klass):
     class_protected_methods = klass['methods']['protected']
     # finally, return True, the default constructor can be safely defined
     for protected_method in class_protected_methods:
-        #print(public_method)
+        # print(public_method)
         if protected_method["constructor"]:
             return False
     class_private_methods = klass['methods']['private']
     # finally, return True, the default constructor can be safely defined
     for private_method in class_private_methods:
-        #print(public_method)
+        # print(public_method)
         if private_method["constructor"]:
             return False
     # finallyn returns True
@@ -1032,15 +948,11 @@ def build_inheritance_tree(classes_dict):
     """
     # first, we build two dictionaries
     # the first one, level_0_classes
-    # contain class names that does not inherit from
-    # any other class
-    # they will be processed first
+    # contain class names that do not inherit from
+    # any other class - they will be processed first
     level_0_classes = []
-    # containes
-    level_n_classes = []
-    # the inheritance dict contains the relationships
-    # betwwen a class and its upper class.
-    # the dict schema is as the following :
+    # the inheritance dict contains the relationship
+    # betwwen a class and its upper class:
     # inheritance_dict = {'base_class_name': 'upper_class_name'}
     inheritance_dict = {}
     for klass in classes_dict.values():
@@ -1087,7 +999,7 @@ def build_inheritance_tree(classes_dict):
     # of ordered classes.
     class_list = []
     for class_name, depth_value in sorted(inheritance_depth.iteritems(),
-                                          key=lambda (k, v): (v, k)):
+                                          key=lambda k, v: (v, k)):
         if class_name in classes_dict:  # TODO: should always be the case!
             class_list.append(classes_dict[class_name])
     return class_list
@@ -1207,20 +1119,16 @@ def process_classes(classes_dict, exclude_classes, exclude_member_functions):
 
 
 def is_module(module_name):
-    """ Checks if the name passed as a parameter is
-    (or is not) a module that aims at being wrapped.
-    'Standard' should return True
-    'inj' should return False
+    """Checks if module_name is a module to wrap.
+    >>> is_module('Standard')
+    True
+    >>> is_module('garbage')
+    False
     """
     for mod in OCE_MODULES + SMESH_MODULES:
         if mod[0] == module_name:
             return True
     return False
-
-
-def test_is_module():
-    assert is_module('Standard') is True
-    assert is_module('something') is False
 
 
 def parse_module(module_name):
@@ -1260,7 +1168,7 @@ class ModuleWrapper(object):
         global CURRENT_MODULE, PYTHON_MODULE_DEPENDENCY
         CURRENT_MODULE = module_name
         PYTHON_MODULE_DEPENDENCY = []
-        reset_header_depency()
+        reset_header_dependency()
         print("=== generating SWIG files for module %s ===" % module_name)
         self._module_name = module_name
         print("\t parsing %s related headers ..." % module_name, end="")
@@ -1341,9 +1249,9 @@ def register_handle(handle, base_object):
         # write classes_definition
         f.write(self._classes_str)
         # write free_functions definition
-        #TODO: we should write free functions here,
+        # TODO: we should write free functions here,
         # but it sometimes fail to compile
-        #f.write(self._free_functions_str)
+        # f.write(self._free_functions_str)
         f.close()
         #
         # Headers
@@ -1374,59 +1282,12 @@ def register_handle(handle, base_object):
                 h.write("%%import %s.i\n" % dep)
 
 
-def process_module(module_name):
-    all_modules = OCE_MODULES + SMESH_MODULES
-    module_exist = False
-    for module in all_modules:
-        if module[0] == module_name:
-            module_exist = True
-            module_additionnal_dependencies = module[1]
-            module_exclude_classes = module[2]
-            if len(module) == 4:
-                modules_exclude_member_functions = module[3]
-            else:
-                modules_exclude_member_functions = {}
-            print("Next to be processed : %s " % module_name)
-            ModuleWrapper(module_name,
-                          module_additionnal_dependencies,
-                          module_exclude_classes,
-                          modules_exclude_member_functions)
-    if not module_exist:
-        raise NameError('Module %s not defined' % module_name)
 
 
-def process_toolkit(toolkit_name):
-    """ Generate wrappers for modules depending on a toolkit
-    For instance : TKernel, TKMath etc.
-    """
-    modules_list = TOOLKITS[toolkit_name]
-    for module in modules_list:
-        process_module(module)
-
-
-def process_all_toolkits():
-    parallel_build = config.get('build', 'parallel_build')
-    if parallel_build == "True":  # multitask
-    	print("parralel")
-        from multiprocessing import Pool
-        pool = Pool()
-        try:
-            # the timeout is required for proper handling when exciting the parallel build
-            pool.map_async(process_toolkit, TOOLKITS).get(9999999999)
-        except KeyboardInterrupt:
-            pool.terminate()
-            pool.join()
-        else:
-            pool.close()
-            pool.join()
-    else:  # single task
-        for toolkit in TOOLKITS:
-            process_toolkit(toolkit)
 
 
 def run_unit_tests():
     print("running unittests ...", end="")
-    test_is_module()
     test_filter_header_list()
     test_get_all_module_headers()
     test_adapt_return_type()
@@ -1437,13 +1298,26 @@ def run_unit_tests():
     test_adapt_default_value()
     print("done.")
 
-if __name__ == '__main__':
-    run_unit_tests()
-    if len(sys.argv) > 1:
-        for module_to_process in sys.argv[1:]:
-            process_module(module_to_process)
+
+def map_parallel(func, iterable):
+    from multiprocessing import Pool
+    pool = Pool()
+    try:
+        # the timeout is required for proper handling when exciting the parallel build
+        pool.map_async(func, iterable).get(9999999999)
+    except KeyboardInterrupt:
+        pool.terminate()
+        pool.join()
     else:
-        write__init__()
-        process_all_toolkits()
-    # to process only one toolkit, uncomment the following line and change the toolkit name
-    #process_toolkit("TKernel")
+        pool.close()
+        pool.join()
+
+
+
+
+def process_toolkit(toolkits, toolkit_name):
+    modules_list = toolkits[toolkit_name]
+    modules_list = TOOLKITS[toolkit_name]
+    map(process_module, modules_list)
+
+
